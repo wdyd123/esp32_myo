@@ -8,6 +8,7 @@ import serial
 SERIAL_PORT = "COM7"
 BAUD_RATE = 115200
 MAX_POINTS = 100
+PLOT_INTERVAL_MS = 20
 
 
 class IMUVisualizer:
@@ -28,7 +29,8 @@ class IMUVisualizer:
 
     def connect_serial(self):
         try:
-            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0)
+            self.ser.reset_input_buffer()
             print(f"Connected to {SERIAL_PORT}")
         except Exception as e:
             print(f"Cannot open serial port: {e}")
@@ -108,16 +110,30 @@ class IMUVisualizer:
         for ax in self.axs:
             ax.set_xlim(x_min, x_max)
 
+    def read_latest_sample(self):
+        latest = None
+
+        while self.ser.in_waiting > 0:
+            raw = self.ser.readline()
+            if not raw:
+                break
+
+            line = raw.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            data = self.parse_line(line)
+            if data:
+                latest = data
+
+        return latest
+
     def update_plot(self, frame):
         if not self.ser or not self.ser.is_open:
             return self.lines
 
         try:
-            line = self.ser.readline().decode("utf-8", errors="ignore").strip()
-            if not line:
-                return self.lines
-
-            data = self.parse_line(line)
+            data = self.read_latest_sample()
             if not data:
                 return self.lines
 
@@ -163,7 +179,11 @@ class IMUVisualizer:
 
     def run(self):
         self.ani = animation.FuncAnimation(
-            self.fig, self.update_plot, interval=20, blit=False, cache_frame_data=False
+            self.fig,
+            self.update_plot,
+            interval=PLOT_INTERVAL_MS,
+            blit=False,
+            cache_frame_data=False,
         )
         plt.show()
 
