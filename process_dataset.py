@@ -1,178 +1,205 @@
+"""
+Myo 数据验证与统计工具
+
+功能：
+  - 扫描 utilities/ 目录中的 myo_data_*.csv 文件
+  - 验证数据格式是否与 train_gesture_nn.py 兼容
+  - 报告各手势的样本数量和时长
+  - 确保数据可直接用于训练
+
+用法：
+  python process_dataset.py
+  python process_dataset.py --data-dir ../utilities
+"""
+
 import argparse
-import csv
-import math
+import glob
+import os
 from collections import defaultdict
 
-IMU_FIELDS = ["qw", "qx", "qy", "qz", "ax", "ay", "az", "gx", "gy", "gz"]
-EMG_FIELDS = [f"emg_{i}" for i in range(16)]
+# 默认数据目录：utilities/（与本文件同级）
+DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utilities")
 
 
-def parse_samples(input_path):
-    samples = []
-    with open(input_path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        headers = next(reader, None)
-        if headers is None:
-            return samples
+def parse_csv(path):
+    """
+    解析单个 CSV 文件，返回统计信息。
+    """
+    imu_count = 0
+    emg_count = 0
+    imu_labels = defaultdict(int)
+    emg_labels = defaultdict(int)
+    imu_timestamps = []
+    emg_timestamps = []
 
-        has_label = any(h.strip().lower() == "label" for h in headers)
-        label_idx = [i for i, h in enumerate(headers) if h.strip().lower() == "label"]
-        label_idx = label_idx[0] if label_idx else None
-
-        for row in reader:
-            if len(row) < 2:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("label,"):
                 continue
-            timestamp_raw = row[0].strip()
-            if not timestamp_raw:
+
+            parts = line.split(",")
+            if len(parts) < 4:
                 continue
+
             try:
-                timestamp = int(float(timestamp_raw))
-            except ValueError:
+                label = int(parts[0])
+                ts = int(float(parts[1]))
+                stype = parts[2].strip().upper()
+            except (ValueError, IndexError):
                 continue
 
-            row_type = row[1].strip().upper()
-            label = row[label_idx].strip() if label_idx is not None and label_idx < len(row) else ""
+            if stype == "IMU" and len(parts) >= 13:
+                imu_count += 1
+                imu_labels[label] += 1
+                imu_timestamps.append(ts)
+            elif stype == "EMG" and len(parts) >= 35:
+                emg_count += 1
+                emg_labels[label] += 1
+                emg_timestamps.append(ts)
 
-            if row_type == "IMU":
-                if len(row) < 12:
-                    continue
-                raw_values = row[2:12]
-                if len(raw_values) != len(IMU_FIELDS):
-                    continue
-                try:
-                    values = [float(v.strip()) for v in raw_values]
-                except Exception:
-                    continue
-                samples.append({"type": "IMU", "ts": timestamp, "values": values, "label": label})
-
-            elif row_type == "EMG":
-                # Support both compact EMG rows and full-width rows with blank IMU slots.
-                if len(row) >= 18 and len(row[2:]) == 16:
-                    raw_values = row[2:18]
-                elif len(row) >= 28:
-                    raw_values = row[12:28]
-                else:
-                    continue
-
-                try:
-                    values = [float(v.strip()) for v in raw_values]
-                except Exception:
-                    continue
-                if len(values) != len(EMG_FIELDS):
-                    continue
-                samples.append({"type": "EMG", "ts": timestamp, "values": values, "label": label})
-
-    return samples
-
-
-def aggregate_stats(values):
-    # values is list of floats
-    n = len(values)
-    if n == 0:
-        return {"mean": math.nan, "std": math.nan, "min": math.nan, "max": math.nan}
-    mean = sum(values) / n
-    var = sum((x - mean) ** 2 for x in values) / n
-    return {"mean": mean, "std": math.sqrt(var), "min": min(values), "max": max(values)}
-
-
-def build_window_features(imu_window, emg_window, start_ts, end_ts):
-    features = {
-        "window_start": start_ts,
-        "window_end": end_ts,
-        "window_center": (start_ts + end_ts) / 2,
-        "imu_count": len(imu_window),
-        "emg_count": len(emg_window),
+    return {
+        "imu_count": imu_count,
+        "emg_count": emg_count,
+        "imu_labels": dict(imu_labels),
+        "emg_labels": dict(emg_labels),
+        "imu_ts_range": (min(imu_timestamps), max(imu_timestamps)) if imu_timestamps else None,
+        "emg_ts_range": (min(emg_timestamps), max(emg_timestamps)) if emg_timestamps else None,
     }
 
-    if imu_window:
-        for idx, field in enumerate(IMU_FIELDS):
-            values = [sample["values"][idx] for sample in imu_window]
-            stats = aggregate_stats(values)
-            features[f"imu_{field}_mean"] = stats["mean"]
-            features[f"imu_{field}_std"] = stats["std"]
-            features[f"imu_{field}_min"] = stats["min"]
-            features[f"imu_{field}_max"] = stats["max"]
-        # last IMU sample in the window
-        last_values = imu_window[-1]["values"]
-        for idx, field in enumerate(IMU_FIELDS):
-            features[f"imu_{field}_last"] = last_values[idx]
+
+def scan_data_dir(data_dir):
+    """扫描目录，返回所有 CSV 文件的统计信息。"""
+    csv_files = sorted(glob.glob(os.path.join(data_dir, "myo_data_*.csv")))
+    if not csv_files:
+        csv_files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+
+    all_stats = []
+    for path in csv_files:
+        stats = parse_csv(path)
+        stats["filename"] = os.path.basename(path)
+        all_stats.append(stats)
+
+    return all_stats
+
+
+def print_report(all_stats, data_dir):
+    """打印数据报告。"""
+    if not all_stats:
+        print("未找到 CSV 文件。")
+        return
+
+    print("\n" + "=" * 70)
+    print("Myo 数据验证报告")
+    print("=" * 70)
+
+    # 文件级统计
+    print("\n【文件统计】")
+    total_imu = 0
+    total_emg = 0
+    all_imu_labels = defaultdict(int)
+    all_emg_labels = defaultdict(int)
+
+    for stats in all_stats:
+        fname = stats["filename"]
+        imu_n = stats["imu_count"]
+        emg_n = stats["emg_count"]
+        total_imu += imu_n
+        total_emg += emg_n
+
+        print(f"\n  {fname}")
+        print(f"    IMU: {imu_n:6d} 样本")
+        print(f"    EMG: {emg_n:6d} 样本")
+
+        if stats["imu_ts_range"]:
+            t0, t1 = stats["imu_ts_range"]
+            duration = (t1 - t0) / 1000.0
+            print(f"    IMU 时长: {duration:.1f} 秒")
+
+        if stats["emg_ts_range"]:
+            t0, t1 = stats["emg_ts_range"]
+            duration = (t1 - t0) / 1000.0
+            print(f"    EMG 时长: {duration:.1f} 秒")
+
+        for lbl, cnt in sorted(stats["imu_labels"].items()):
+            all_imu_labels[lbl] += cnt
+        for lbl, cnt in sorted(stats["emg_labels"].items()):
+            all_emg_labels[lbl] += cnt
+
+    # 汇总统计
+    print("\n" + "=" * 70)
+    print("【汇总统计】")
+    print(f"  文件数: {len(all_stats)}")
+    print(f"  IMU 总样本: {total_imu}")
+    print(f"  EMG 总样本: {total_emg}")
+
+    # 手势分布
+    all_labels = sorted(set(all_imu_labels.keys()) | set(all_emg_labels.keys()))
+    if all_labels:
+        print("\n【手势分布】")
+        print(f"  {'手势':>6s}  {'IMU':>8s}  {'EMG':>8s}  {'状态':>10s}")
+        print("  " + "-" * 40)
+        for lbl in all_labels:
+            imu_n = all_imu_labels.get(lbl, 0)
+            emg_n = all_emg_labels.get(lbl, 0)
+            status = "OK" if (imu_n > 0 and emg_n > 0) else "incomplete"
+            print(f"  {lbl:>6d}  {imu_n:>8d}  {emg_n:>8d}  {status:>10s}")
+
+    # 兼容性检查
+    print("\n" + "=" * 70)
+    print("【兼容性检查】")
+
+    issues = []
+    for stats in all_stats:
+        if stats["imu_count"] == 0:
+            issues.append(f"  {stats['filename']}: 无 IMU 数据")
+        if stats["emg_count"] == 0:
+            issues.append(f"  {stats['filename']}: 无 EMG 数据")
+
+        imu_labels_set = set(stats["imu_labels"].keys())
+        emg_labels_set = set(stats["emg_labels"].keys())
+        missing_emg = imu_labels_set - emg_labels_set
+        missing_imu = emg_labels_set - imu_labels_set
+
+        if missing_emg:
+            issues.append(f"  {stats['filename']}: 手势 {sorted(missing_emg)} 有 IMU 但无 EMG")
+        if missing_imu:
+            issues.append(f"  {stats['filename']}: 手势 {sorted(missing_imu)} 有 EMG 但无 IMU")
+
+    if issues:
+        print("  ! 发现以下问题：")
+        for issue in issues:
+            print(issue)
     else:
-        for field in IMU_FIELDS:
-            features[f"imu_{field}_mean"] = math.nan
-            features[f"imu_{field}_std"] = math.nan
-            features[f"imu_{field}_min"] = math.nan
-            features[f"imu_{field}_max"] = math.nan
-            features[f"imu_{field}_last"] = math.nan
+        print("  OK 所有文件格式正确，可用于训练。")
 
-    if emg_window:
-        for ch in range(16):
-            values = [sample["values"][ch] for sample in emg_window]
-            stats = aggregate_stats(values)
-            features[f"emg_{ch}_mean"] = stats["mean"]
-            features[f"emg_{ch}_std"] = stats["std"]
-            features[f"emg_{ch}_min"] = stats["min"]
-            features[f"emg_{ch}_max"] = stats["max"]
-    else:
-        for ch in range(16):
-            features[f"emg_{ch}_mean"] = math.nan
-            features[f"emg_{ch}_std"] = math.nan
-            features[f"emg_{ch}_min"] = math.nan
-            features[f"emg_{ch}_max"] = math.nan
-
-    return features
-
-
-def write_features(output_path, feature_rows):
-    if not feature_rows:
-        raise ValueError("No feature rows to write.")
-
-    fieldnames = list(feature_rows[0].keys())
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in feature_rows:
-            writer.writerow(row)
+    abs_data_dir = os.path.abspath(data_dir)
+    print("\n" + "=" * 70)
+    print("训练命令：")
+    print(f"  python train_gesture_nn.py --data-dir {abs_data_dir} --epochs 100")
+    print("=" * 70 + "\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate Myo IMU+EMG into sliding windows.")
-    parser.add_argument("--input", default="myo_dataset.csv", help="Input CSV path")
-    parser.add_argument("--output", default="processed_dataset.csv", help="Output CSV path")
-    parser.add_argument("--window-ms", type=int, default=100, help="Window width in milliseconds")
-    parser.add_argument("--step-ms", type=int, default=50, help="Window step in milliseconds")
-    parser.add_argument("--min-imu", type=int, default=1, help="Minimum IMU samples required in each window")
-    parser.add_argument("--min-emg", type=int, default=1, help="Minimum EMG samples required in each window")
+    parser = argparse.ArgumentParser(
+        description="验证 Myo 数据并生成统计报告",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  python process_dataset.py
+  python process_dataset.py --data-dir ../utilities
+        """
+    )
+    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
+                        help="包含 myo_data_*.csv 文件的目录 (默认: ../utilities)")
     args = parser.parse_args()
 
-    samples = parse_samples(args.input)
-    if not samples:
-        raise ValueError("No valid samples found in input CSV.")
+    if not os.path.isdir(args.data_dir):
+        print(f"错误：目录不存在: {args.data_dir}")
+        return
 
-    imu_samples = [s for s in samples if s["type"] == "IMU"]
-    emg_samples = [s for s in samples if s["type"] == "EMG"]
-    if not imu_samples or not emg_samples:
-        raise ValueError("Input must contain both IMU and EMG samples.")
-
-    min_ts = min(s["ts"] for s in samples)
-    max_ts = max(s["ts"] for s in samples)
-
-    window_rows = []
-    start = min_ts
-    while start + args.window_ms <= max_ts + 1:
-        end = start + args.window_ms
-        imu_window = [s for s in imu_samples if start <= s["ts"] < end]
-        emg_window = [s for s in emg_samples if start <= s["ts"] < end]
-
-        if len(imu_window) >= args.min_imu and len(emg_window) >= args.min_emg:
-            window_rows.append(build_window_features(imu_window, emg_window, start, end))
-
-        start += args.step_ms
-
-    if not window_rows:
-        raise ValueError("No windows met the minimum sample requirements.")
-
-    write_features(args.output, window_rows)
-    print(f"Wrote {len(window_rows)} aggregated windows to {args.output}")
+    all_stats = scan_data_dir(args.data_dir)
+    print_report(all_stats, args.data_dir)
 
 
 if __name__ == "__main__":

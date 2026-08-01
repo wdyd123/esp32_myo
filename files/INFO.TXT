@@ -1,0 +1,18 @@
+{
+
+"application": {
+  "version": {
+    "major": 1,
+    "minor": 5,
+    "patch": 1970,
+    "hardware_revision": 2
+  }
+}
+,
+
+"hardware": {
+  "mac_address": "d5-5a-8e-39-d6-95",
+  "imu_calibrated": 1
+}
+
+}
